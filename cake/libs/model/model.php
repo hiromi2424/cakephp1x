@@ -1388,12 +1388,19 @@ class Model extends Overloadable {
 			if (isset($this->hasAndBelongsToMany[$assoc])) {
 				list($join) = $this->joinModel($this->hasAndBelongsToMany[$assoc]['with']);
 
-				$isUUID = !empty($this->{$join}->primaryKey) && (
-						$this->{$join}->_schema[$this->{$join}->primaryKey]['length'] == 36 && (
-						$this->{$join}->_schema[$this->{$join}->primaryKey]['type'] === 'string' ||
-						$this->{$join}->_schema[$this->{$join}->primaryKey]['type'] === 'binary'
+				$primarySchema = !empty($this->{$join}->primaryKey) ? $this->{$join}->_schema[$this->{$join}->primaryKey] : null;
+
+				$isUUID = $primarySchema !== null && (
+						$primarySchema['length'] == 36 && (
+						$primarySchema['type'] === 'string' ||
+						$primarySchema['type'] === 'binary'
 					)
 				);
+				$primaryIsUnique =
+					$primarySchema !== null &&
+					isset($primarySchema['key']) && $primarySchema['key'] == 'primary' &&
+					$this->{$join}->primaryKey != $this->hasAndBelongsToMany[$assoc]['foreignKey'] &&
+					$this->{$join}->primaryKey != $this->hasAndBelongsToMany[$assoc]['associationForeignKey'];
 
 				$newData = $newValues = array();
 				$primaryAdded = false;
@@ -1408,9 +1415,75 @@ class Model extends Overloadable {
 					$fields[] = $idField;
 					$primaryAdded = true;
 				}
+				
+
+				$oldLinks = array();
+
+				if ($this->hasAndBelongsToMany[$assoc]['unique']) {
+					$conditions = array_merge(
+						array($join . '.' . $this->hasAndBelongsToMany[$assoc]['foreignKey'] => $id),
+						(array)$this->hasAndBelongsToMany[$assoc]['conditions']
+					);
+					$_fields = array($this->hasAndBelongsToMany[$assoc]['associationForeignKey']);
+					if($primaryIsUnique){
+						$_fields[] = $this->{$join}->primaryKey;
+					}
+					$links = $this->{$join}->find('all', array(
+						'conditions' => $conditions,
+						'recursive' => empty($this->hasAndBelongsToMany[$assoc]['conditions']) ? -1 : 0,
+						'fields' => $_fields
+					));
+
+					$toDeleteLinks = array();
+
+					$associationForeignKey = "{$join}." . $this->hasAndBelongsToMany[$assoc]['associationForeignKey'];
+
+					if($primaryIsUnique){
+						$oldLinks = Set::combine($links, "{n}.{$join}.{$this->$join->primaryKey}", "{n}.{$associationForeignKey}");
+
+						$newLinks = array();
+						foreach((array)$data as $key => $row){
+							$newLink = null;
+
+							if ((is_string($row) && (strlen($row) == 36 || strlen($row) == 16)) || is_numeric($row)) {
+								$newLink = $row;
+							} elseif (isset($row[$this->hasAndBelongsToMany[$assoc]['associationForeignKey']])) {
+								$newLink = $row[$this->hasAndBelongsToMany[$assoc]['associationForeignKey']];
+								if(in_array($newLink, $oldLinks)){
+									$data[$key][$this->{$join}->primaryKey] = array_search($newLink, $oldLinks);
+								}
+							} elseif (isset($row[$join]) && isset($row[$join][$this->hasAndBelongsToMany[$assoc]['associationForeignKey']])) {
+								$newLink = $row[$join][$this->hasAndBelongsToMany[$assoc]['associationForeignKey']];
+								if(in_array($newLink, $oldLinks)){
+									$data[$key][$join][$this->{$join}->primaryKey] = array_search($newLink, $oldLinks);
+								}
+							}
+
+							if(!$newLink){
+								continue;
+							}
+
+							$newLinks[] = $newLink;
+						}
+						$newLinks = array_unique($newLinks);
+
+						$toDeleteLinks = array_diff($oldLinks, $newLinks);
+					}else{
+						$oldLinks = Set::extract($links, "{n}.{$associationForeignKey}");
+						$toDeleteLinks = $oldLinks;
+					}
+
+					if (!empty($toDeleteLinks)) {
+ 						$conditions[$associationForeignKey] = $toDeleteLinks;
+						$db->delete($this->{$join}, $conditions);
+					}
+				}
 
 				foreach ((array)$data as $row) {
 					if ((is_string($row) && (strlen($row) == 36 || strlen($row) == 16)) || is_numeric($row)) {
+						if($primaryIsUnique && in_array($row, $oldLinks)){
+							continue;
+						}
 						$values = array(
 							$db->value($id, $this->getColumnType($this->primaryKey)),
 							$db->value($row)
@@ -1422,28 +1495,17 @@ class Model extends Overloadable {
 						$newValues[] = "({$values})";
 						unset($values);
 					} elseif (isset($row[$this->hasAndBelongsToMany[$assoc]['associationForeignKey']])) {
+						if($primaryIsUnique && in_array($row[$this->hasAndBelongsToMany[$assoc]['associationForeignKey']], $oldLinks)
+							&& !isset($row[$this->{$join}->primaryKey]) ){
+							continue;
+						}
 						$newData[] = $row;
 					} elseif (isset($row[$join]) && isset($row[$join][$this->hasAndBelongsToMany[$assoc]['associationForeignKey']])) {
+						if($primaryIsUnique && in_array($row[$join][$this->hasAndBelongsToMany[$assoc]['associationForeignKey']], $oldLinks)
+							 && !isset($row[$join][$this->{$join}->primaryKey]) ){
+							continue;
+						}
 						$newData[] = $row[$join];
-					}
-				}
-
-				if ($this->hasAndBelongsToMany[$assoc]['unique']) {
-					$conditions = array_merge(
-						array($join . '.' . $this->hasAndBelongsToMany[$assoc]['foreignKey'] => $id),
-						(array)$this->hasAndBelongsToMany[$assoc]['conditions']
-					);
-					$links = $this->{$join}->find('all', array(
-						'conditions' => $conditions,
-						'recursive' => empty($this->hasAndBelongsToMany[$assoc]['conditions']) ? -1 : 0,
-						'fields' => $this->hasAndBelongsToMany[$assoc]['associationForeignKey']
-					));
-
-					$associationForeignKey = "{$join}." . $this->hasAndBelongsToMany[$assoc]['associationForeignKey'];
-					$oldLinks = Set::extract($links, "{n}.{$associationForeignKey}");
-					if (!empty($oldLinks)) {
- 						$conditions[$associationForeignKey] = $oldLinks;
-						$db->delete($this->{$join}, $conditions);
 					}
 				}
 

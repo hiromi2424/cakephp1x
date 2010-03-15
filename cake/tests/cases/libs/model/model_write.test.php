@@ -1538,7 +1538,7 @@ class ModelWriteTest extends BaseModelTest {
 		$TestModel->save($data);
 		$result = $TestModel->read(null, 1);
 		$time = date('Y-M-D H:i:s');
-		$expected = array(4, 5);
+		$expected = array(1, 4);
 		$this->assertEqual(Set::extract('/JoinC/JoinAsJoinC/id', $result), $expected);
 		$expected = array('new record', 'new record');
 		$this->assertEqual(Set::extract('/JoinC/JoinAsJoinC/other', $result), $expected);
